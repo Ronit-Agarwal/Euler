@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Euler's Method</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; max-width: 500px; }
+        label { display: block; margin-top: 10px; font-weight: bold; }
+        input, select, button { width: 100%; padding: 5px; margin-top: 2px; box-sizing: border-box; }
+        button { margin-top: 15px; font-weight: bold; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { border: 1px solid #000; padding: 5px; text-align: left; }
+        .hint { font-size: 12px; color: #555; margin-top: 3px; }
+        #preview { font-size: 13px; margin-top: 4px; color: #225; }
+        #error { color: #b00; font-weight: bold; margin-top: 15px; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+
+    <h3>Euler's Method Calculator</h3>
+
+    <label>dy/dx equation:</label>
+    <input type="text" id="eq" value="e^(xy)" oninput="showPreview()">
+    <div class="hint">
+        Type it like normal math: <code>e^(xy)</code>, <code>2x - y^2</code>, <code>sin(x)cos(y)</code>,
+        <code>x/y + 3</code>, <code>sqrt(x^2 + y^2)</code>, <code>ln(y)</code>, <code>pi x</code>.<br>
+        Functions: sin cos tan sec csc cot, arcsin arccos arctan, sinh cosh tanh, sqrt cbrt, exp ln log abs.
+    </div>
+    <div id="preview"></div>
+
+    <label>Initial x:</label>
+    <input type="number" id="x0" value="1" step="any">
+
+    <label>Initial y:</label>
+    <input type="number" id="y0" value="2" step="any">
+
+    <label>Choose inputs:</label>
+    <select id="mode" onchange="updateInputs()">
+        <option value="1">Step size (dx) & Steps</option>
+        <option value="2" selected>Step size (dx) & Final x</option>
+        <option value="3">Steps & Final x</option>
+    </select>
+
+    <div id="p_dx"><label>Step size (dx):</label><input type="number" id="dx" value="0.01" step="any">
+        <div class="hint" id="dxhint">With a final x, the direction (+/−) is picked automatically.</div></div>
+    <div id="p_steps" style="display:none;"><label>Number of steps:</label><input type="number" id="steps" value="20"></div>
+    <div id="p_xf"><label>Final x:</label><input type="number" id="xf" value="0.8" step="any"></div>
+
+    <button onclick="calculate()">Compute</button>
+
+    <div id="error"></div>
+
+    <div id="result" style="margin-top:20px; display:none;">
+        <p><strong>Final Point:</strong> <span id="final"></span></p>
+        <p id="note" class="hint"></p>
+        <table>
+            <thead><tr><th>Step</th><th>x</th><th>y</th><th>dy/dx</th></tr></thead>
+            <tbody id="rows"></tbody>
+        </table>
+    </div>
+
+    <script>
+        // ---------- Friendly math parser ----------
+        // Turns things like "e^(xy)", "2x - y^2", "sin x cos y" into a JS function.
+
+        var FUNCS = {
+            arcsin: "Math.asin", arccos: "Math.acos", arctan: "Math.atan",
+            asin: "Math.asin", acos: "Math.acos", atan: "Math.atan",
+            sinh: "Math.sinh", cosh: "Math.cosh", tanh: "Math.tanh",
+            sqrt: "Math.sqrt", cbrt: "Math.cbrt", abs: "Math.abs",
+            sin: "Math.sin", cos: "Math.cos", tan: "Math.tan",
+            sec: "1/Math.cos", csc: "1/Math.sin", cot: "1/Math.tan",
+            exp: "Math.exp", ln: "Math.log", log: "Math.log10"
+        };
+        var CONSTS = { pi: "Math.PI", e: "Math.E" };
+        var VARS = { x: "x", y: "y" };
+        // Longest names first so "sinh" wins over "sin", "exp" over "e", etc.
+        var NAMES = Object.keys(FUNCS).concat(Object.keys(CONSTS), Object.keys(VARS))
+                          .sort(function (a, b) { return b.length - a.length; });
+
+        function tokenize(s) {
+            s = s.toLowerCase()
+                 .replace(/math\./g, "")      // allow old "Math.exp(...)" style too
+                 .replace(/\*\*/g, "^")       // allow ** for powers
+                 .replace(/π/g, "pi")
+                 .replace(/[×·]/g, "*").replace(/÷/g, "/").replace(/−/g, "-")
+                 .replace(/[\[{]/g, "(").replace(/[\]}]/g, ")");
+            var tokens = [], i = 0;
+            while (i < s.length) {
+                var c = s[i];
+                if (/\s/.test(c)) { i++; continue; }
+                if (/[0-9.]/.test(c)) {
+                    var m = s.slice(i).match(/^(\d+\.?\d*|\.\d+)/);
+                    if (!m) throw "Bad number near \"" + s.slice(i) + "\"";
+                    tokens.push({ type: "num", value: m[0] }); i += m[0].length; continue;
+                }
+                if (/[a-z]/.test(c)) {
+                    var found = null;
+                    for (var k = 0; k < NAMES.length; k++) {
+                        if (s.startsWith(NAMES[k], i)) { found = NAMES[k]; break; }
+                    }
+                    if (!found) {
+                        var word = s.slice(i).match(/^[a-z]+/)[0];
+                        throw "I don't know what \"" + word + "\" means. Use x, y, e, pi, or a function like sin, ln, sqrt.";
+                    }
+                    var type = FUNCS[found] ? "func" : CONSTS[found] ? "const" : "var";
+                    tokens.push({ type: type, value: found }); i += found.length; continue;
+                }
+                if ("+-*/^()".indexOf(c) >= 0) { tokens.push({ type: "op", value: c }); i++; continue; }
+                throw "Unexpected character \"" + c + "\"";
+            }
+            return tokens;
+        }
+
+        function parse(str) {
+            var tokens = tokenize(str), pos = 0;
+            if (tokens.length === 0) throw "Please enter an equation for dy/dx.";
+
+            function peek() { return tokens[pos]; }
+            function isOp(t, v) { return t && t.type === "op" && t.value === v; }
+            function expect(v) {
+                if (!isOp(peek(), v)) throw "Expected \"" + v + "\"" + (peek() ? " before \"" + peek().value + "\"" : " at the end");
+                pos++;
+            }
+            function startsFactor(t) {
+                return t && (t.type === "num" || t.type === "var" || t.type === "const" ||
+                             t.type === "func" || isOp(t, "("));
+            }
+
+            // expr := term (('+'|'-') term)*
+            function expr() {
+                var left = term();
+                while (isOp(peek(), "+") || isOp(peek(), "-")) {
+                    var op = tokens[pos++].value;
+                    left = "(" + left + op + term() + ")";
+                }
+                return left;
+            }
+            // term := unary (('*'|'/') unary | <implicit *> unary)*
+            function term() {
+                var left = unary();
+                while (true) {
+                    var t = peek();
+                    if (isOp(t, "*") || isOp(t, "/")) {
+                        pos++; left = "(" + left + t.value + unary() + ")";
+                    } else if (startsFactor(t)) {
+                        left = "(" + left + "*" + unary() + ")";   // 2x, xy, x(y+1), (x)(y)
+                    } else break;
+                }
+                return left;
+            }
+            // unary := ('-'|'+') unary | power        (so -x^2 = -(x^2))
+            function unary() {
+                if (isOp(peek(), "-")) { pos++; return "(-" + unary() + ")"; }
+                if (isOp(peek(), "+")) { pos++; return unary(); }
+                return power();
+            }
+            // power := primary ('^' unary)?            (right-assoc, allows 2^-x)
+            function power() {
+                var base = primary();
+                if (isOp(peek(), "^")) { pos++; return "Math.pow(" + base + "," + unary() + ")"; }
+                return base;
+            }
+            function primary() {
+                var t = peek();
+                if (!t) throw "The equation ends too early.";
+                pos++;
+                if (t.type === "num") return "(" + t.value + ")";
+                if (t.type === "var") return VARS[t.value];
+                if (t.type === "const") return CONSTS[t.value];
+                if (t.type === "func") {
+                    var arg;
+                    if (isOp(peek(), "(")) { pos++; arg = expr(); expect(")"); }
+                    else arg = unary();   // sin x, ln y, sin x^2 = sin(x^2)
+                    return "(" + FUNCS[t.value] + "(" + arg + "))";
+                }
+                if (isOp(t, "(")) { var e = expr(); expect(")"); return "(" + e + ")"; }
+                throw "Unexpected \"" + t.value + "\"";
+            }
+
+            var js = expr();
+            if (pos < tokens.length) throw "Unexpected \"" + tokens[pos].value + "\"";
+            return new Function("x", "y", "return " + js + ";");
+        }
+
+        // ---------- UI ----------
+        function showPreview() {
+            var p = document.getElementById("preview");
+            try {
+                var f = parse(document.getElementById("eq").value);
+                var x0 = parseFloat(document.getElementById("x0").value);
+                var y0 = parseFloat(document.getElementById("y0").value);
+                var v = f(x0, y0);
+                p.style.color = "#225";
+                p.textContent = isFinite(v) ? "✓ Looks good. At the start point, dy/dx = " + fmt(v) : "✓ Understood.";
+            } catch (e) {
+                p.style.color = "#b00";
+                p.textContent = "⚠ " + e;
+            }
+        }
+
+        function updateInputs() {
+            var m = document.getElementById("mode").value;
+            document.getElementById("p_dx").style.display = (m == "1" || m == "2") ? "block" : "none";
+            document.getElementById("p_steps").style.display = (m == "1" || m == "3") ? "block" : "none";
+            document.getElementById("p_xf").style.display = (m == "2" || m == "3") ? "block" : "none";
+            document.getElementById("dxhint").style.display = (m == "2") ? "block" : "none";
+        }
+
+        function fmt(n) {
+            if (!isFinite(n)) return String(n);
+            return Number(n.toPrecision(10)).toString();
+        }
+
+        function num(id, name) {
+            var raw = document.getElementById(id).value.trim();
+            var v = parseFloat(raw);
+            if (raw === "" || isNaN(v)) throw "Please enter a number for " + name + ".";
+            return v;
+        }
+
+        function calculate() {
+            var err = document.getElementById("error");
+            var result = document.getElementById("result");
+            err.textContent = "";
+            result.style.display = "none";
+
+            try {
+                var f = parse(document.getElementById("eq").value);
+                var x0 = num("x0", "Initial x");
+                var y = num("y0", "Initial y");
+                var m = document.getElementById("mode").value;
+                var dx, steps, xf, note = "";
+
+                if (m == "1") {
+                    dx = num("dx", "Step size");
+                    steps = num("steps", "Number of steps");
+                } else if (m == "2") {
+                    dx = Math.abs(num("dx", "Step size"));
+                    xf = num("xf", "Final x");
+                    if (dx === 0) throw "Step size can't be 0.";
+                    if (xf < x0) dx = -dx;               // go the right direction automatically
+                    var exact = (xf - x0) / dx;
+                    steps = Math.round(exact);
+                    if (Math.abs(exact - steps) > 1e-9)
+                        note = "Note: (final x − initial x) isn't a whole number of steps, so it stops at the nearest step.";
+                } else {
+                    steps = num("steps", "Number of steps");
+                    xf = num("xf", "Final x");
+                    if (steps <= 0) throw "Number of steps must be more than 0.";
+                    dx = (xf - x0) / Math.round(steps);
+                }
+
+                if (dx === 0) throw "Step size can't be 0.";
+                if (steps < 0 || Math.round(steps) !== steps) throw "Number of steps must be a whole number (0 or more).";
+                if (steps > 100000) throw "That's a lot of steps (" + steps + "). Try a bigger step size.";
+
+                var rows = [];
+                var x = x0;
+                for (var i = 0; i <= steps; i++) {
+                    x = x0 + i * dx;                     // avoids rounding drift in x
+                    var slope = f(x, y);
+                    rows.push("<tr><td>" + i + "</td><td>" + fmt(x) + "</td><td>" + fmt(y) +
+                              "</td><td>" + (i < steps ? fmt(slope) : "") + "</td></tr>");
+                    if (i < steps) {
+                        if (!isFinite(slope)) {
+                            note = "Stopped at step " + i + ": dy/dx is " + slope + " at (" + fmt(x) + ", " + fmt(y) + ") (e.g. divide by 0 or log of a negative).";
+                            break;
+                        }
+                        y += slope * dx;
+                    }
+                }
+
+                document.getElementById("rows").innerHTML = rows.join("");
+                document.getElementById("final").textContent = "(" + fmt(x) + ", " + fmt(y) + ")";
+                document.getElementById("note").textContent = note;
+                result.style.display = "block";
+            } catch (e) {
+                err.textContent = "⚠ " + (e.message || e);
+            }
+        }
+
+        updateInputs();
+        showPreview();
+    </script>
+</body>
+</html>
